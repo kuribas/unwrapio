@@ -1,0 +1,28 @@
+Name:		unwrapio
+Version: 	0.0.1
+Synopsis:	unwrapping into the IO monad
+Category: 	MonadTransformers
+Copyright: 	Kristof Bastiaensen (2019)
+Stability:	Unstable
+License:	BSD3
+License-file:	LICENSE
+Author:		Kristof Bastiaensen
+Maintainer:	Kristof Bastiaensen
+Bug-Reports: 	https://github.com/kuribas/unwrapio/issues
+Build-type:	Simple
+Cabal-version:	>=1.8
+Description:  Unwrapping into the IO monad
+ 
+source-repository head
+  type:		git
+  location:	https://github.com/kuribas/unwrapio
+
+Library
+  Ghc-options: -Wall
+  Build-depends: base >= 3 && < 5, mtl >= 2.1.3, transformers
+  hs-source-dirs:
+    src                 
+  Exposed-Modules:
+    Control.Monad.IO.Unwrap
+    UnwrapIO.Exception
+
