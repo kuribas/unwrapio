@@ -2,7 +2,12 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-module Control.Monad.IO.Unwrap where
+{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE StandaloneDeriving #-}
+module Control.Monad.IO.Unwrap (
+  withUnwrappedCallback, withUnwrappedMonad, 
+  unwrapIO, rewrapIO, rewrapIO_traverse, unwrapIO_CB,
+  UnwrapIO) where
 import Control.Monad
 import Control.Monad.Trans
 import Control.Monad.Trans.State
@@ -11,62 +16,99 @@ import Control.Monad.Trans.Maybe
 import Control.Monad.Trans.Reader
 import Control.Monad.Trans.Identity
 import Control.Monad.Trans.Writer
-import qualified Control.Monad.Trans.RWS as RWS
 
+-- | A class which allows unwrapping of the target monad into a IO monad
+-- returning a pure result.
 class MonadIO m => UnwrapIO m where
-  unwrapIO_CB :: (a -> m b) -> m (a -> IO (m b))
+  -- | Returns an unwrapper, using the current monadic context.  The
+  -- unwrapper unwraps the target monad into an IO monad. Note that
+  -- the inner monad in the result is pure, correct instances
+  -- don't perform any IO actions in the inner monad.  You
+  -- probably shouldn't be using this function, use the helpers
+  -- instead, like `withUnwrappedMonad`.
+  getUnwrapper :: m (m a -> IO (m a))
 
 instance UnwrapIO IO where
-  unwrapIO_CB = pure . (fmap pure)
+  getUnwrapper = pure $ fmap pure
+  {-# INLINE getUnwrapper #-}
 
 instance UnwrapIO m => UnwrapIO (StateT s m) where
-  unwrapIO_CB f = do
+  getUnwrapper = do
     s <- get
-    lift $ fmap (fmap (fmap (StateT . const))) $
-      unwrapIO_CB $ \a -> runStateT (f a) s
-    
-instance UnwrapIO m => UnwrapIO (MaybeT m) where
-  unwrapIO_CB f = lift $ fmap (fmap (fmap MaybeT)) $
-                  unwrapIO_CB $ \a -> runMaybeT (f a)
-  
+    innerUnwrapper <- lift getUnwrapper
+    pure $ \m -> fmap (StateT . const) $
+                 innerUnwrapper $ 
+                 runStateT m s
+  {-# INLINE getUnwrapper #-}
 
-instance UnwrapIO m => UnwrapIO (ExceptT e m) where
-  unwrapIO_CB f = lift $ fmap (fmap (fmap ExceptT)) $
-                  unwrapIO_CB $ \a -> runExceptT (f a)
+instance UnwrapIO m => UnwrapIO (MaybeT m) where
+  getUnwrapper = do
+    innerUnwrapper <- lift getUnwrapper
+    pure $ \m -> fmap MaybeT $ innerUnwrapper $
+                 runMaybeT m
+  {-# INLINE getUnwrapper #-}
   
+instance UnwrapIO m => UnwrapIO (ExceptT e m) where
+  getUnwrapper = do
+    innerUnwrapper <- lift getUnwrapper
+    pure $ \m -> fmap ExceptT $ innerUnwrapper $
+                 runExceptT m
+  {-# INLINE getUnwrapper #-}
+ 
 instance UnwrapIO m => UnwrapIO (ReaderT r m) where
-  unwrapIO_CB f = do
-    r <- ask
-    lift $ fmap (fmap (fmap lift)) $
-      unwrapIO_CB $ \a -> runReaderT (f a) r
+  getUnwrapper = do
+    s <- ask
+    innerUnwrapper <- lift getUnwrapper
+    pure $ \m -> fmap (ReaderT . const) $ 
+                 innerUnwrapper $ runReaderT m s
+  {-# INLINE getUnwrapper #-}
 
 instance (UnwrapIO m, Monoid w) => UnwrapIO (WriterT w m) where
-  unwrapIO_CB f = lift $ fmap (fmap (fmap WriterT)) $
-                  unwrapIO_CB $ \a -> runWriterT (f a)
-    
+  getUnwrapper = do
+    innerUnwrapper <- lift getUnwrapper
+    pure $ \m ->
+      fmap WriterT $
+      innerUnwrapper $ 
+      runWriterT m
+  {-# INLINE getUnwrapper #-}
+
 instance UnwrapIO m => UnwrapIO (IdentityT m) where
-  unwrapIO_CB f = lift $ fmap (fmap (fmap IdentityT)) $
-                  unwrapIO_CB $ runIdentityT . f
+  getUnwrapper = do
+    innerUnwrapper <- lift getUnwrapper
+    pure $ \m -> fmap IdentityT $ innerUnwrapper $ runIdentityT m
+  {-# INLINE getUnwrapper #-}
 
-instance (UnwrapIO m, Monoid w) => UnwrapIO (RWS.RWST r w s m) where
-  unwrapIO_CB f = do
-    r <- RWS.ask
-    s <- RWS.get
-    lift $ fmap (fmap (fmap (\m -> RWS.RWST $ \_ _ -> m))) $ 
-      unwrapIO_CB $ \a -> RWS.runRWST (f a) r s
-
--- | rewrap the IO monad into the monad.
+-- | Unwrap a monad.
+unwrapIO :: UnwrapIO m => m a -> m (IO (m a))
+unwrapIO m = (\unwrapper -> unwrapper m) <$> getUnwrapper
+{-# INLINE unwrapIO #-}
+  
+-- | Rewrap the monad.
 rewrapIO :: MonadIO m => m (IO (m a)) -> m a
 rewrapIO m = join (m >>= liftIO)
+{-# INLINE rewrapIO #-}
 
--- | unwrap the monad into a IO monad.
-unwrapIO :: UnwrapIO m => m a -> m (IO (m a))
-unwrapIO m = ($ ()) <$> unwrapIO_CB (const m)
+-- | Unwrap a callback.
+unwrapIO_CB :: (Monad m, UnwrapIO m) => (a -> m b) -> m (a -> IO (m b))
+unwrapIO_CB f = (\unwrapper -> unwrapper . f) <$> getUnwrapper
+{-# INLINE unwrapIO_CB #-}    
 
--- | Call a function with an callback in the IO, with an UnwrapIO monad
--- callback.  It does the wrapping and unwrapping for you.  Typical
--- use is for functions which acquire resources, and ensure closing of
--- the resource.
-unwrapCallback :: UnwrapIO m => ((a -> IO (m b)) -> IO (m b))
+-- | More general version of rewrapIO, for when the callback returns the main
+-- result in a traversable (for example `try`).
+rewrapIO_traverse :: (MonadIO m, Traversable f) => m (IO (f (m a))) -> m (f a)
+rewrapIO_traverse m = m >>= liftIO >>= sequence
+{-# INLINE rewrapIO_traverse #-}
+
+-- | Lift a resource handling function into the monad.  Unwraps the
+-- callback, passes it to the given function, and rewraps the
+-- result. The typical usecase is to handle safe acquiring and
+-- releasing of resources.
+withUnwrappedCallback :: UnwrapIO m => ((a -> IO (m b)) -> IO (m b))
              -> (a -> m b) -> m b
-unwrapCallback withCb cb = rewrapIO $ fmap withCb $ unwrapIO_CB cb
+withUnwrappedCallback withCb cb = rewrapIO $ withCb <$> unwrapIO_CB cb
+{-# INLINE withUnwrappedCallback #-}
+
+-- | Lift a function of IO monads into a function of the target monad.
+withUnwrappedMonad :: UnwrapIO m => (IO (m a) -> IO (m a)) -> m a -> m a
+withUnwrappedMonad f m = rewrapIO $ f <$> unwrapIO m
+{-# INLINE withUnwrappedMonad #-}

@@ -26,32 +26,30 @@ handle = flip catch
 
 handleJust :: (UnwrapIO m, E.Exception e)
            => (e -> Maybe b) -> (b -> m a) -> m a ->  m a
-handleJust s = flip (catchJust s)
+handleJust s = flip $ catchJust s
 
 try :: (E.Exception e, UnwrapIO m) => m a -> m (Either e a)
 try block =
-  rewrapIO $ fmap (fmap (either (pure . Left) (fmap Right))) $
-  E.try <$> unwrapIO block
+  rewrapIO_traverse $ E.try <$> unwrapIO block
 
 tryJust :: (E.Exception e, UnwrapIO m)
         => (e -> Maybe b) -> m a -> m (Either b a)
 tryJust test block =
-  rewrapIO $ fmap (fmap (either (pure . Left) (fmap Right))) $
-  E.tryJust test <$> unwrapIO block
+  rewrapIO_traverse $ E.tryJust test <$> unwrapIO block
 
 bracket :: (UnwrapIO m) => IO a -> (a -> IO b) -> (a -> m c) -> m c
-bracket acquire release = unwrapCallback (E.bracket acquire release)
+bracket acquire release = withUnwrappedCallback (E.bracket acquire release)
 
 bracket_ :: (UnwrapIO m) => IO a -> IO b -> m c -> m c
 bracket_ acquire release block =
   rewrapIO $ E.bracket_ acquire release <$> unwrapIO block
 
 bracketOnError :: (UnwrapIO m) => IO a -> (a -> IO b) -> (a -> m c) -> m c
-bracketOnError acquire onError = unwrapCallback $
+bracketOnError acquire onError = withUnwrappedCallback $
   E.bracketOnError acquire onError
 
 finally :: (UnwrapIO m) => m a -> IO b -> m a
-finally block final = rewrapIO $ flip E.finally final <$> (unwrapIO block)
+finally block final = rewrapIO $ E.finally <$> unwrapIO block <*> pure final
 
 onException :: (UnwrapIO m) => m a -> IO b -> m a
 onException block final =
